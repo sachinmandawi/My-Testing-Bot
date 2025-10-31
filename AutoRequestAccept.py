@@ -1,4 +1,3 @@
-# AutoRequestAccept_with_undo_and_autobackup.py
 # -*- coding: utf-8 -*-
 """
 AutoApproveBot (v4.8 - no Mongo, with Import, Import&Merge, Export, Clear, UNDO, Auto-Backup)
@@ -806,7 +805,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             removed = data["owners"].pop(idx)
             save_data(data)
-            await query.message.reply_text(f"✅ Removed owner `{removed}`", parse_mode="Markdown")
+            await query.message.edit_text(f"✅ Removed owner `{removed}`", parse_mode="Markdown")
+
+            # --- MODIFIED CODE: Notify removed owner ---
+            try:
+                await context.bot.send_message(
+                    chat_id=removed,
+                    text="ℹ️ You have been removed as an owner of this bot. You can no longer use /owner command."
+                )
+            except Exception as e:
+                print(f"[INFO] Could not notify removed owner {removed}: {e}")
+            # --- END MODIFICATION ---
+
         except Exception:
             await query.message.reply_text("❌ Invalid selection.")
         return
@@ -1172,6 +1182,17 @@ async def owner_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         save_data(data)
         context.user_data.clear()
         await update.message.reply_text(f"✅ Added owner `{new_owner}`", parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+
+        # --- MODIFIED CODE: Notify new owner ---
+        try:
+            await context.bot.send_message(
+                chat_id=new_owner,
+                text="🎉 Congratulations! You have been promoted to an owner of this bot.\nYou can now use /owner command."
+            )
+        except Exception as e:
+            print(f"[INFO] Could not notify new owner {new_owner}: {e}")
+        # --- END MODIFICATION ---
+        
         return
 
     # Force add steps
