@@ -400,12 +400,11 @@ def db_panel_kb():
 
 
 def autobackup_kb(data):
-    ab = data.get("auto_backup", {})
-    enabled = ab.get("enabled", False)
-    interval = ab.get("interval_minutes", 60)
     kb = [
-        [InlineKeyboardButton(f"🔁 Toggle Auto-Backup ({'On' if enabled else 'Off'})", callback_data="db_backup_toggle")],
-        [InlineKeyboardButton(f"⏱️ Set Interval ({interval} minutes)", callback_data="db_backup_set_interval")],
+        [
+            InlineKeyboardButton("🔁 Toggle", callback_data="db_backup_toggle"),
+            InlineKeyboardButton("⏱️ Set Interval", callback_data="db_backup_set_interval")
+        ],
         [InlineKeyboardButton("⬅️ Back", callback_data="db_back")],
     ]
     return InlineKeyboardMarkup(kb)
@@ -568,8 +567,23 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data(data)
 
     bot_username = (await context.bot.get_me()).username
-    add_to_group_button = InlineKeyboardButton("➕ Add Me To Your Group ➕", url=f"https://t.me/{bot_username}?startgroup=true")
-    keyboard = InlineKeyboardMarkup([[add_to_group_button]])
+    
+    # --- UPDATED SECTION: Vertical buttons for Group and Channel ---
+    add_to_group_button = InlineKeyboardButton(
+        "➕ Add Me To Your Group ➕",
+        url=f"https://t.me/{bot_username}?startgroup=true"
+    )
+    
+    add_to_channel_button = InlineKeyboardButton(
+        "➕ Add Me To Your Channel ➕",
+        url=f"https://t.me/{bot_username}?startchannel=true&admin=invite_users"
+    )
+    
+    keyboard = InlineKeyboardMarkup([
+        [add_to_group_button],
+        [add_to_channel_button]
+    ])
+    # --- END OF UPDATE ---
 
     await update.message.reply_text(WELCOME_TEXT, parse_mode="Markdown", reply_markup=keyboard)
 
@@ -703,7 +717,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if payload == "db_autobackup":
         data = load_data()
-        await query.message.edit_text("⚙️ *Auto Backup Settings*\nManage automatic backups to owners.", parse_mode="Markdown", reply_markup=autobackup_kb(data))
+        ab = data.get("auto_backup", {})
+        enabled = ab.get("enabled", False)
+        interval = ab.get("interval_minutes", 60)
+        
+        status_text = "✅ On" if enabled else "❌ Off"
+        
+        msg = (
+            "⚙️ *Auto Backup Settings*\n\n"
+            f"Status: *{status_text}*\n"
+            f"Interval: *{interval} minutes*"
+        )
+        await query.message.edit_text(msg, parse_mode="Markdown", reply_markup=autobackup_kb(data))
         return
 
     if payload == "db_backup_toggle":
@@ -712,16 +737,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_state = not bool(ab.get("enabled", False))
         ab["enabled"] = new_state
         save_data(data)
+        
         app = context.application
         if new_state:
             interval = ab.get("interval_minutes", 60)
             schedule_auto_backup_job(app, interval)
-            await query.message.edit_text(f"✅ Auto-backup ENABLED. Interval: {interval} minutes.", reply_markup=autobackup_kb(data))
         else:
             jobs = app.job_queue.get_jobs_by_name("auto_backup")
             for j in jobs:
                 j.schedule_removal()
-            await query.message.edit_text("✅ Auto-backup DISABLED.", reply_markup=autobackup_kb(data))
+
+        # Refresh the panel with the new status
+        enabled = ab.get("enabled", False)
+        interval = ab.get("interval_minutes", 60)
+        status_text = "✅ On" if enabled else "❌ Off"
+        msg = (
+            "⚙️ *Auto Backup Settings*\n\n"
+            f"Status: *{status_text}*\n"
+            f"Interval: *{interval} minutes*"
+        )
+        await query.message.edit_text(msg, parse_mode="Markdown", reply_markup=autobackup_kb(data))
         return
 
     if payload == "db_backup_set_interval":
@@ -901,8 +936,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await query.message.reply_text("✅ Verification complete!")
             bot_username = (await context.bot.get_me()).username
-            add_to_group_button = InlineKeyboardButton("➕ Add Me To Your Group ➕", url=f"https://t.me/{bot_username}?startgroup=true")
-            keyboard = InlineKeyboardMarkup([[add_to_group_button]])
+            
+            # --- UPDATED SECTION: Vertical buttons for Group and Channel ---
+            add_to_group_button = InlineKeyboardButton(
+                "➕ Add Me To Your Group ➕",
+                url=f"https://t.me/{bot_username}?startgroup=true"
+            )
+            add_to_channel_button = InlineKeyboardButton(
+                "➕ Add Me To Your Channel ➕",
+                url=f"https://t.me/{bot_username}?startchannel=true&admin=invite_users"
+            )
+            
+            keyboard = InlineKeyboardMarkup([
+                [add_to_group_button],
+                [add_to_channel_button]
+            ])
+            # --- END OF UPDATE ---
 
             await query.message.reply_text(WELCOME_TEXT, parse_mode="Markdown", reply_markup=keyboard)
         else:
