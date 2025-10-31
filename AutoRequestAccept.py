@@ -131,16 +131,29 @@ def merge_data(existing: dict, new: dict):
     merged = dict(existing)  # shallow copy
     summary = {"owners_added": 0, "subs_added": 0, "chats_added": 0, "force_channels_added": 0, "delay_changed": False}
 
+    # --- FIX: Helper to convert all list items to integers for proper comparison ---
+    def to_int_list(items):
+        if not isinstance(items, list):
+            return []
+        clean_list = []
+        for item in items:
+            try:
+                clean_list.append(int(item))
+            except (ValueError, TypeError):
+                continue
+        return clean_list
+    # --- END FIX ---
+
     # Owners
-    e_owners = set(existing.get("owners", []))
-    n_owners = set(new.get("owners", []))
+    e_owners = set(to_int_list(existing.get("owners", [])))
+    n_owners = set(to_int_list(new.get("owners", [])))
     combined_owners = list(e_owners.union(n_owners))
     summary["owners_added"] = max(0, len(combined_owners) - len(e_owners))
     merged["owners"] = combined_owners
 
     # Subscribers
-    e_subs = set(existing.get("subscribers", []))
-    n_subs = set(new.get("subscribers", []))
+    e_subs = set(to_int_list(existing.get("subscribers", [])))
+    n_subs = set(to_int_list(new.get("subscribers", [])))
     combined_subs = list(e_subs.union(n_subs))
     summary["subs_added"] = max(0, len(combined_subs) - len(e_subs))
     merged["subscribers"] = combined_subs
@@ -207,7 +220,6 @@ def merge_data(existing: dict, new: dict):
         merged["auto_backup"] = existing.get("auto_backup", DEFAULT_DATA["auto_backup"]).copy()
     # DO NOT merge "sent_backup_messages"; always keep the existing log
     merged["sent_backup_messages"] = existing.get("sent_backup_messages", {})
-
 
     return merged, summary
 
@@ -1286,7 +1298,15 @@ def main():
         print("Please set BOT_TOKEN at the top of the script before running.")
         return
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    # --- FIX: Increased timeouts to prevent "Timed out" errors on slow connections ---
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .read_timeout(60)
+        .write_timeout(60)
+        .build()
+    )
+    # --- END FIX ---
 
     # Handlers
     app.add_handler(CommandHandler("start", start_cmd))
