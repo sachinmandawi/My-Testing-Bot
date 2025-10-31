@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-AutoApproveBot (v4.8 - no Mongo, with Import, Import&Merge, Export, Clear, UNDO, Auto-Backup)
+AutoApproveBot (v4.9 - With Auto-Delete for Old Backups)
 Single DB: Local JSON only (data.json)
 Author: Adapted for Sachin Sir 🔥
 Features:
+ - Keeps only the last 5 backups in owner chat, older ones are auto-deleted.
  - Import (overwrite), Import & Merge, Export, Clear DB (with backup)
  - UNDO (restore last backup) via "last_backup.json"
- - Automatic periodic backups to owners (default 60 minutes) + custom interval (mins/hours)
+ - Automatic periodic backups to owners (default 60 minutes) + custom interval
  - Force-join, delayed approval, owner panel, broadcast, owner management
 """
 
@@ -60,11 +61,12 @@ DEFAULT_DATA = {
     },
     "approval_delay_minutes": 0,
     "known_chats": [],
-    # auto-backup settings
     "auto_backup": {
         "enabled": True,
         "interval_minutes": 60  # default 60 minutes
-    }
+    },
+    # --- NEW: To track sent backup messages for auto-deletion ---
+    "sent_backup_messages": {}, # format: {"owner_id": [msg_id1, msg_id2, ...]}
 }
 
 
@@ -77,6 +79,9 @@ def _ensure_data_keys(data):
             data["force"].setdefault(k, v)
     if "auto_backup" not in data:
         data["auto_backup"] = DEFAULT_DATA["auto_backup"].copy()
+    # --- NEW: Ensure the backup message log exists ---
+    if "sent_backup_messages" not in data:
+        data["sent_backup_messages"] = {}
     return data
 
 
@@ -210,9 +215,12 @@ def merge_data(existing: dict, new: dict):
         if k not in merged:
             merged[k] = v
 
-    # preserve auto_backup if not provided in new
+    # preserve auto_backup settings if not provided in new
     if "auto_backup" not in merged:
         merged["auto_backup"] = existing.get("auto_backup", DEFAULT_DATA["auto_backup"]).copy()
+    # DO NOT merge "sent_backup_messages"; always keep the existing log
+    merged["sent_backup_messages"] = existing.get("sent_backup_messages", {})
+
 
     return merged, summary
 
@@ -460,10 +468,10 @@ def parse_interval_to_minutes(text: str) -> int:
     return total
 
 
+# --- MODIFIED FUNCTION ---
 async def perform_and_send_backup(context: ContextTypes.DEFAULT_TYPE):
     """
-    Create a timestamped backup, send to owners, update LAST_BACKUP_FILE.
-    Intended to be used as a job callback.
+    Create a backup, send to owners, log message IDs, and delete old backups.
     """
     try:
         data = load_data()
@@ -472,21 +480,43 @@ async def perform_and_send_backup(context: ContextTypes.DEFAULT_TYPE):
         with open(fname, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
 
-        # update last backup file (overwrite)
+        # Update last backup file for UNDO
         try:
             shutil.copyfile(fname, LAST_BACKUP_FILE)
         except Exception:
             with open(LAST_BACKUP_FILE, "w", encoding="utf-8") as lf:
                 json.dump(data, lf, indent=4)
 
-        # send to owners (try context.job.chat_id not used; iterate owners)
         owners = data.get("owners", []) or [OWNER_ID]
+        backup_log = data.setdefault("sent_backup_messages", {})
+
         for o in owners:
             try:
-                await context.bot.send_document(chat_id=o, document=open(fname, "rb"), caption=f"📦 Auto-backup: {timestamp}")
-            except Exception:
-                # ignore per-owner failure
+                # Send the new backup
+                sent_message = await context.bot.send_document(
+                    chat_id=o,
+                    document=open(fname, "rb"),
+                    caption=f"📦 Auto-backup: {timestamp}"
+                )
+
+                # Log the new backup message ID
+                owner_log = backup_log.setdefault(str(o), [])
+                owner_log.append(sent_message.message_id)
+
+                # If log exceeds 5, delete the oldest one
+                if len(owner_log) > 5:
+                    msg_to_delete = owner_log.pop(0)  # Get and remove the oldest ID
+                    try:
+                        await context.bot.delete_message(chat_id=o, message_id=msg_to_delete)
+                    except Exception as e:
+                        print(f"Could not delete old backup message {msg_to_delete} for owner {o}: {e}")
+
+            except Exception as send_err:
+                print(f"Failed to send backup to owner {o}: {send_err}")
                 continue
+
+        # Save data once after all owners are processed
+        save_data(data)
 
         # remove local timestamped file to keep disk clean
         try:
@@ -508,7 +538,7 @@ async def perform_and_send_backup(context: ContextTypes.DEFAULT_TYPE):
 
 def schedule_auto_backup_job(application: Application, interval_minutes: int):
     """
-    Cancel existing auto-backup jobs named 'auto_backup' and schedule a new repeating job.
+    Cancel existing auto-backup jobs and schedule a new one.
     """
     # cancel existing
     try:
@@ -663,15 +693,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pass
 
             # Now clear local DB
+            new_data = DEFAULT_DATA.copy()
+            # --- MODIFIED: Preserve owners after clear ---
+            new_data["owners"] = current_data.get("owners", [OWNER_ID])
             with open(DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(DEFAULT_DATA, f, indent=2)
+                json.dump(new_data, f, indent=2)
+
 
             try:
                 os.remove(backup_filename)
             except Exception:
                 pass
 
-            await query.message.edit_text("✅ Database cleared and reset to defaults. A backup was created and sent to owner. Use 'Undo Last Backup' if you want to restore.")
+            await query.message.edit_text("✅ Database cleared. A backup was sent. Owners have been preserved.")
         except Exception as e:
             await query.message.edit_text(f"❌ Failed to clear DB: `{e}`", parse_mode="Markdown", reply_markup=db_panel_kb())
         return
@@ -679,7 +713,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # UNDO last backup
     if payload == "db_undo":
         if not os.path.exists(LAST_BACKUP_FILE):
-            await query.message.reply_text("ℹ️ No last backup found to restore. (No operations created a backup yet.)", reply_markup=db_panel_kb())
+            await query.message.reply_text("ℹ️ No last backup found to restore.", reply_markup=db_panel_kb())
             return
         kb = [
             [InlineKeyboardButton("✅ Confirm Restore Last Backup", callback_data="db_confirm_undo")],
@@ -697,7 +731,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.edit_text("❌ Last backup file seems corrupted or invalid. Undo aborted.", reply_markup=db_panel_kb())
                 return
             save_data(backup_data)
-            await query.message.edit_text("✅ Restored database from last backup. You may Export to save a copy or check /owner -> Manage Owner to confirm owners.", reply_markup=db_panel_kb())
+            await query.message.edit_text("✅ Restored database from last backup.", reply_markup=db_panel_kb())
         except Exception as e:
             await query.message.edit_text(f"❌ Failed to restore last backup: `{e}`", parse_mode="Markdown", reply_markup=db_panel_kb())
         return
@@ -806,17 +840,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             removed = data["owners"].pop(idx)
             save_data(data)
             await query.message.edit_text(f"✅ Removed owner `{removed}`", parse_mode="Markdown")
-
-            # --- MODIFIED CODE: Notify removed owner ---
             try:
                 await context.bot.send_message(
                     chat_id=removed,
-                    text="ℹ️ You have been removed as an owner of this bot. You can no longer use /owner command."
+                    text="ℹ️ You have been removed as an owner of this bot."
                 )
             except Exception as e:
                 print(f"[INFO] Could not notify removed owner {removed}: {e}")
-            # --- END MODIFICATION ---
-
         except Exception:
             await query.message.reply_text("❌ Invalid selection.")
         return
@@ -977,7 +1007,7 @@ async def owner_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             file_content = await json_file.download_as_bytearray()
             new_data = json.loads(file_content.decode("utf-8"))
             if not isinstance(new_data, dict) or "owners" not in new_data:
-                await update.message.reply_text("❌ Invalid JSON structure. The file must be a valid bot data backup (object with 'owners').", reply_markup=ReplyKeyboardRemove())
+                await update.message.reply_text("❌ Invalid JSON structure.", reply_markup=ReplyKeyboardRemove())
                 context.user_data.clear()
                 try:
                     os.remove(backup_filename)
@@ -985,10 +1015,12 @@ async def owner_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     pass
                 return
 
-            # Overwrite
-            # ensure auto_backup key remains if absent in new_data (avoid accidental removal)
+            # Overwrite but preserve some settings
             if "auto_backup" not in new_data:
                 new_data["auto_backup"] = current_data.get("auto_backup", DEFAULT_DATA["auto_backup"]).copy()
+            if "sent_backup_messages" not in new_data:
+                new_data["sent_backup_messages"] = current_data.get("sent_backup_messages", {})
+
 
             save_data(new_data)
             await update.message.reply_text("✅ Database successfully imported and overwritten.", reply_markup=ReplyKeyboardRemove())
@@ -1025,7 +1057,7 @@ async def owner_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 with open(LAST_BACKUP_FILE, "w", encoding="utf-8") as lf:
                     json.dump(current_data, lf, indent=4)
 
-            # send backup to owner (try chat then owners)
+            # send backup to owner
             try:
                 await context.bot.send_document(chat_id=update.message.chat_id, document=open(backup_filename, "rb"), caption="📦 Backup before merging DB")
             except Exception:
@@ -1040,7 +1072,7 @@ async def owner_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             file_content = await json_file.download_as_bytearray()
             new_data = json.loads(file_content.decode("utf-8"))
             if not isinstance(new_data, dict) or "owners" not in new_data:
-                await update.message.reply_text("❌ Invalid JSON structure. The file must be a valid bot data backup (object with 'owners').", reply_markup=ReplyKeyboardRemove())
+                await update.message.reply_text("❌ Invalid JSON structure.", reply_markup=ReplyKeyboardRemove())
                 context.user_data.clear()
                 try:
                     os.remove(backup_filename)
@@ -1118,7 +1150,6 @@ async def owner_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         data = load_data()
         ab = data.setdefault("auto_backup", {})
         ab["interval_minutes"] = minutes
-        # keep enabled state as-is
         save_data(data)
 
         # reschedule job immediately if enabled
@@ -1182,17 +1213,14 @@ async def owner_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         save_data(data)
         context.user_data.clear()
         await update.message.reply_text(f"✅ Added owner `{new_owner}`", parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
-
-        # --- MODIFIED CODE: Notify new owner ---
         try:
             await context.bot.send_message(
                 chat_id=new_owner,
-                text="🎉 Congratulations! You have been promoted to an owner of this bot.\nYou can now use /owner command."
+                text="🎉 Congratulations! You have been promoted to an owner of this bot."
             )
         except Exception as e:
             print(f"[INFO] Could not notify new owner {new_owner}: {e}")
-        # --- END MODIFICATION ---
-        
+
         return
 
     # Force add steps
@@ -1205,7 +1233,7 @@ async def owner_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data["force_add_entry"] = entry
         context.user_data["flow"] = "force_add_step2"
         await update.message.reply_text(
-            f"✅ Channel detected: `{entry.get('chat_id') or entry.get('invite')}`\n\nNow send the button text to show to users (e.g. `🔗 Join Channel`).",
+            f"✅ Channel detected: `{entry.get('chat_id') or entry.get('invite')}`\n\nNow send the button text (e.g. `🔗 Join Channel`).",
             parse_mode="Markdown",
             reply_markup=cancel_btn(),
         )
@@ -1219,7 +1247,7 @@ async def owner_flow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         btn = text
         if len(btn) > 40:
-            await update.message.reply_text("❌ Button text too long (max 40 chars). Send shorter text.")
+            await update.message.reply_text("❌ Button text too long (max 40 chars).")
             return
         entry["join_btn_text"] = btn
         data = load_data()
@@ -1246,7 +1274,7 @@ async def _approve_user_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
         try:
-            await context.bot.send_message(user_id, "✅ You have been automatically approved to the channel!")
+            await context.bot.send_message(user_id, "✅ You have been automatically approved!")
         except Exception:
             pass
     except Exception as e:
@@ -1255,7 +1283,7 @@ async def _approve_user_job(context: ContextTypes.DEFAULT_TYPE):
         owners = data.get("owners", [])
         for o in owners:
             try:
-                await context.bot.send_message(o, f"❗ Delayed approval failed for user `{user_id}` in chat `{chat_id}`.\nError: `{e}`", parse_mode="Markdown")
+                await context.bot.send_message(o, f"❗ Delayed approval failed for `{user_id}` in `{chat_id}`.\nError: `{e}`", parse_mode="Markdown")
             except Exception:
                 pass
 
@@ -1271,14 +1299,14 @@ async def _process_approval(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
             print(f"[ERR] Failed to schedule approval for {user_id} in {chat_id}: {e}")
             for o in data.get("owners", []):
                 try:
-                    await context.bot.send_message(o, f"❗ Failed to schedule approval for user `{user_id}` in chat `{chat_id}`.\nError: `{e}`", parse_mode="Markdown")
+                    await context.bot.send_message(o, f"❗ Failed to schedule approval for `{user_id}` in `{chat_id}`.\nError: `{e}`", parse_mode="Markdown")
                 except Exception:
                     pass
     else:
         try:
             await context.bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
             try:
-                await context.bot.send_message(user_id, "✅ You have been automatically approved to the channel!")
+                await context.bot.send_message(user_id, "✅ You have been automatically approved!")
             except Exception:
                 pass
         except Exception as e:
@@ -1290,9 +1318,7 @@ async def _process_approval(context: ContextTypes.DEFAULT_TYPE, chat_id: int, us
                         f"Error: `{e}`\n\n"
                         "Common causes:\n"
                         "- Bot is not admin in the chat.\n"
-                        "- Bot doesn't have permission to approve join requests.\n"
-                        "- Chat id is invalid or bot removed from chat.\n\n"
-                        "Please ensure the bot is admin in that chat and has permission to add/approve users."
+                        "- Bot lacks 'Invite Users via Link' permission."
                     ), parse_mode="Markdown")
                 except Exception:
                     pass
@@ -1361,7 +1387,7 @@ def main():
     except Exception as e:
         print(f"[WARN] Could not schedule auto-backup at startup: {e}")
 
-    print("🤖 AutoApproveBot v4.8 (no mongo, with merge, undo & auto-backup) running...")
+    print("🤖 AutoApproveBot v4.9 (with auto-delete for old backups) running...")
     app.run_polling()
 
 
